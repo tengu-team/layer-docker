@@ -1,8 +1,8 @@
-includes: 
+includes:
   - 'layer:basic'
   - 'layer:apt'
   - 'interface:docker-image-host'
-repo: https://github.com/juju-solutions/layer-docker.git #TODO
+repo: git@github.com:IBCNServices/layer-docker.git
 defines:
   skip-install:
     description: Useful when creating docker subordinates, skip the install routine
