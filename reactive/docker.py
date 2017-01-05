@@ -1,17 +1,16 @@
-import os
-from shlex import split
+#/usr/bin/env python3
+# pylint:disable=c0301,c0111,c0103
 from subprocess import check_call, check_output, CalledProcessError
 
 from charmhelpers.core import host, hookenv, unitdata
-from charmhelpers.core.hookenv import config, status_set
+from charmhelpers.core.hookenv import config, status_set, open_port
 from charmhelpers.core.templating import render
 
-from charms.reactive import remove_state, set_state, when, when_any, when_not, when_all
-from charms.reactive.helpers import data_changed
+from charms.reactive import remove_state, set_state, when, when_not
 
-from charms import layer
+from charms import layer #pylint:disable=E0611
 
-import charms.apt
+from charms import apt #pylint:disable=E0611,E1101
 
 # 2 Major events are emitted from this layer.
 #
@@ -37,7 +36,7 @@ def install():
 
     # Install docker-engine from apt.
     status_set('maintenance', 'Installing docker-engine via apt install docker.io.')
-    charms.apt.queue_install(['docker.io'])
+    apt.queue_install(['docker.io'])
 
     unitdata.kv().set('next_port', 30000)
 
@@ -45,10 +44,10 @@ def install():
 @when_not('docker.ready')
 def configure_docker():
     reload_system_daemons()
-    
+
     # Make with the adding of the users to the groups
     check_call(['usermod', '-aG', 'docker', 'ubuntu'])
-    
+
     hookenv.log('Docker installed, setting "docker.ready" state.')
     set_state('docker.ready')
 
@@ -68,7 +67,7 @@ def signal_workloads_start():
         status_set('waiting', 'Container runtime not available.')
         return
 
-    status_set('active', 'Container runtime available.')
+    status_set('active', 'Ready')
     set_state('docker.available')
 
 
@@ -83,9 +82,8 @@ def docker_restart():
 def run_images(dh):
     images = dh.images
     hookenv.log(images)
-    if images:
-        for image in images:
-            run_image(dh, image)
+    for image in images:
+        run_image(dh, image)
 
 
 def recycle_daemon():
@@ -146,32 +144,36 @@ def run_image(dh, image):
     elif image['secret']:
         hookenv.status_set('blocking', 'Pulling the docker image failed. When providing a secret, make sure you also fill in the username.')
         return
-    
+
     cmd = ['docker', 'pull', image['image']]
     check_call(cmd)
 
     cmd = ['docker', 'run', '--name', '{}'.format(image['name'])]
+    published_ports = {}
     if image['daemon']:
         cmd.append('-d')
     hookenv.log(image['ports'])
     if image['interactive']:
         cmd.append('-i')
     if image['ports']:
-        published_ports = {}
         kv = unitdata.kv()
         next_port = kv.get('next_port')
         hookenv.log('For this docker engine, the next available port is {}.'.format(next_port))
         for port in image['ports']:
             cmd.append('-p')
-            cmd.append('{}:{}'.format(next_port++, port.strip()))
-            published_ports[next_port] = port.strip()
+            next_port = next_port + 1
+            cmd.append('{}:{}'.format(next_port, port.strip()))
+            published_ports[port.strip()] = next_port
         kv.set('next_port', next_port)
         hookenv.log('Reset the next available port for this docker engine to {}.'.format(next_port))
         dh.send_published_ports(published_ports)
-        
+
     cmd.append('{}'.format(image['image']))
     hookenv.log(cmd)
     check_call(cmd)
+    for port in published_ports.values():
+        open_port(port)
+
 
 def get_container_id(image):
     cmd = ['docker', 'ps', '-aq', '-f', 'name={}'.format(image['name'])]
@@ -180,5 +182,3 @@ def get_container_id(image):
 def remove_container(container_id):
     cmd = ['docker', 'rm', '-f', container_id]
     return check_call(cmd)
-
-
