@@ -1,30 +1,17 @@
 import os
 from shlex import split
-from subprocess import check_call
-from subprocess import check_output
-from subprocess import CalledProcessError
+from subprocess import check_call, check_output, CalledProcessError
 
-from charmhelpers.core import host
-from charmhelpers.core import hookenv
-from charmhelpers.core.hookenv import status_set
-from charmhelpers.core.hookenv import config
+from charmhelpers.core import host, hookenv, unitdata
+from charmhelpers.core.hookenv import config, status_set
 from charmhelpers.core.templating import render
-from charmhelpers.fetch import apt_install
-from charmhelpers.fetch import apt_purge
-from charmhelpers.fetch import apt_update
-from charmhelpers.fetch import filter_installed_packages
 
-from charms.reactive import remove_state
-from charms.reactive import set_state
-from charms.reactive import when
-from charms.reactive import when_any
-from charms.reactive import when_not
+from charms.reactive import remove_state, set_state, when, when_any, when_not, when_all
 from charms.reactive.helpers import data_changed
 
-from charms.docker import Docker
-from charms.docker import DockerOpts
-
 from charms import layer
+
+import charms.apt
 
 # 2 Major events are emitted from this layer.
 #
@@ -40,143 +27,30 @@ from charms import layer
 # Be sure you bind to it appropriately in your workload layer and
 # react to the proper event.
 
-
-@when_not('docker.ready')
+@when_not('docker.ready', 'apt.installed.docker.io')
 def install():
-    ''' Install the docker daemon, and supporting tooling '''
-    # Often when building layer-docker based subordinates, you dont need to
-    # incur the overhead of installing docker. This tuneable layer option
-    # allows you to disable the exec of that install routine, and instead short
-    # circuit immediately to docker.available, so you can charm away!
     layer_opts = layer.options('docker')
     if layer_opts['skip-install']:
         set_state('docker.available')
         set_state('docker.ready')
         return
 
-    status_set('maintenance', 'Installing AUFS and other tools.')
-    kernel_release = check_output(['uname', '-r']).rstrip()
-    packages = [
-        'aufs-tools',
-        'git',
-        'linux-image-extra-{0}'.format(kernel_release.decode('utf-8')),
-    ]
-    apt_update()
-    apt_install(packages)
     # Install docker-engine from apt.
-    if config('install_from_upstream'):
-        install_from_upstream_apt()
-    else:
-        install_from_archive_apt()
+    status_set('maintenance', 'Installing docker-engine via apt install docker.io.')
+    charms.apt.queue_install(['docker.io'])
 
-    opts = DockerOpts()
-    render('docker.defaults', '/etc/default/docker', {'opts': opts.to_s()})
-    render('docker.systemd', '/lib/systemd/system/docker.service', config())
+    unitdata.kv().set('next_port', 30000)
+
+@when('apt.installed.docker.io')
+@when_not('docker.ready')
+def configure_docker():
     reload_system_daemons()
-
-    hookenv.log('Docker installed, setting "docker.ready" state.')
-    set_state('docker.ready')
-
+    
     # Make with the adding of the users to the groups
     check_call(['usermod', '-aG', 'docker', 'ubuntu'])
-
-
-@when('config.changed.install_from_upstream', 'docker.ready')
-def toggle_docker_daemon_source():
-    ''' A disruptive toggleable action which will swap out the installed docker
-    daemon for the configured source. If true, installs the latest available
-    docker from the upstream PPA. Else installs docker from universe. '''
-
-    # this returns a list of packages not currently installed on the system
-    # based on the parameters input. Use this to check if we have taken
-    # prior action against a docker deb package.
-    packages = filter_installed_packages(['docker.io', 'docker-engine'])
-
-    if 'docker.io' in packages and 'docker_engine' in packages:
-        # we have not reached installation phase, return until
-        # we can reasonably re-test this scenario
-        hookenv.log('Neither docker.io nor docker-engine are installed. Noop.')
-        return
-
-    install_ppa = config('install_from_upstream')
-
-    # Remove the inverse package from what is declared. Only take action if
-    # we meet having a package installed.
-    if install_ppa and 'docker.io' not in packages:
-        host.service_stop('docker')
-        hookenv.log('Removing docker.io package.')
-        apt_purge('docker.io')
-        remove_state('docker.ready')
-        remove_state('docker.available')
-    elif not install_ppa and 'docker-engine' not in packages:
-        host.service_stop('docker')
-        hookenv.log('Removing docker-engine package.')
-        apt_purge('docker-engine')
-        remove_state('docker.ready')
-        remove_state('docker.available')
-    else:
-        hookenv.log('Not touching packages.')
-
-
-@when_any('config.changed.http_proxy', 'config.changed.https_proxy')
-@when('docker.ready')
-def proxy_changed():
-    '''The proxy information has changed, render templates and restart the
-    docker daemon.'''
-    recycle_daemon()
-
-
-def install_from_archive_apt():
-    status_set('maintenance', 'Installing docker.io from universe.')
-    apt_install(['docker.io'], fatal=True)
-
-
-def install_from_upstream_apt():
-    ''' Install docker from the apt repository. This is a pyton adaptation of
-    the shell script found at https://get.docker.com/ '''
-    status_set('maintenance', 'Installing docker-engine from upstream PPA.')
-    keyserver = 'hkp://p80.pool.sks-keyservers.net:80'
-    key = '58118E89F3A912897C070ADBF76221572C52609D'
-    # Enter the server and key in the apt-key management tool.
-    cmd = 'apt-key adv --keyserver {0} --recv-keys {1}'.format(keyserver, key)
-    # "apt-key adv --keyserver hkp://p80.pool.sks-keyservers.net:80
-    # --recv-keys 58118E89F3A912897C070ADBF76221572C52609D"
-    check_call(split(cmd))
-    # The url to the server that contains the docker apt packages.
-    apt_url = 'https://apt.dockerproject.org'
-    # Get the package architecture (amd64), not the machine hardware (x86_64)
-    arch = check_output(split('dpkg --print-architecture'))
-    arch = arch.decode('utf-8').rstrip()
-    # Get the lsb information as a dictionary.
-    lsb = host.lsb_release()
-    # Ubuntu must be lowercased.
-    dist = lsb['DISTRIB_ID'].lower()
-    # The codename for the release.
-    code = lsb['DISTRIB_CODENAME']
-    # repo can be: main, testing or experimental
-    repo = 'main'
-    # deb [arch=amd64] https://apt.dockerproject.org/repo ubuntu-xenial main
-    deb = 'deb [arch={0}] {1}/repo {2}-{3} {4}'.format(
-            arch, apt_url, dist, code, repo)
-    # mkdir -p /etc/apt/sources.list.d
-    if not os.path.isdir('/etc/apt/sources.list.d'):
-        os.makedirs('/etc/apt/sources.list.d')
-    # Write the docker source file to the apt sources.list.d directory.
-    with(open('/etc/apt/sources.list.d/docker.list', 'w+')) as stream:
-        stream.write(deb)
-    apt_update(fatal=True)
-    # apt-get install -y -q docker-engine
-    apt_install(['docker-engine'], fatal=True)
-
-
-@when('docker.ready')
-@when_not('cgroups.modified')
-def enable_grub_cgroups():
-    cfg = config()
-    if cfg.get('enable-cgroups'):
-        hookenv.log('Calling enable_grub_cgroups.sh and rebooting machine.')
-        check_call(['scripts/enable_grub_cgroups.sh'])
-        set_state('cgroups.modified')
+    
+    hookenv.log('Docker installed, setting "docker.ready" state.')
+    set_state('docker.ready')
 
 
 @when('docker.ready')
@@ -198,57 +72,6 @@ def signal_workloads_start():
     set_state('docker.available')
 
 
-@when('sdn-plugin.available', 'docker.available')
-def container_sdn_setup(sdn):
-    ''' Receive the information from the SDN plugin, and render the docker
-    engine options. '''
-    sdn_config = sdn.get_sdn_config()
-    bind_ip = sdn_config['subnet']
-    mtu = sdn_config['mtu']
-    if data_changed('bip', bind_ip) or data_changed('mtu', mtu):
-        status_set('maintenance', 'Configuring container runtime with SDN.')
-        opts = DockerOpts()
-        # This is a great way to misconfigure a docker daemon. Remove the
-        # existing bind ip and mtu values of the SDN
-        if opts.exists('bip'):
-            opts.pop('bip')
-        if opts.exists('mtu'):
-            opts.pop('mtu')
-        opts.add('bip', bind_ip)
-        opts.add('mtu', mtu)
-        _remove_docker_network_bridge()
-        set_state('docker.sdn.configured')
-
-
-@when_not('sdn-plugin.available')
-@when('docker.sdn.configured')
-def scrub_sdn_config():
-    ''' If this scenario of states is true, we have likely broken a
-    relationship to our once configured SDN provider. This necessitates a
-    cleanup of the Docker Options for BIP and MTU of the presumed dead SDN
-    interface. '''
-
-    opts = DockerOpts()
-    try:
-        opts.pop('bip')
-    except KeyError:
-        hookenv.log('Unable to locate bip in Docker config.')
-        hookenv.log('Assuming no action required.')
-
-    try:
-        opts.pop('mtu')
-    except KeyError:
-        hookenv.log('Unable to locate mtu in Docker config.')
-        hookenv.log('Assuming no action required.')
-
-    # This method does everything we need to ensure the bridge configuration
-    # has been removed. restarting the daemon restores docker with its default
-    # networking mode.
-    _remove_docker_network_bridge()
-    recycle_daemon()
-    remove_state('docker.sdn.configured')
-
-
 @when('docker.restart')
 def docker_restart():
     '''Other layers should be able to trigger a daemon restart. Invoke the
@@ -256,20 +79,13 @@ def docker_restart():
     recycle_daemon()
     remove_state('docker.restart')
 
-
-@when('config.changed.docker-opts', 'docker.ready')
-def docker_template_update():
-    ''' The user has passed configuration that directly effects our running
-    docker engine instance. Re-render the systemd files and recycle the
-    service. '''
-    recycle_daemon()
-
-
-@when('docker.ready', 'dockerhost.connected')
-@when_not('dockerhost.configured')
-def dockerhost_connected(dockerhost):
-    '''Transmits the docker url to any subordinates requiring it'''
-    dockerhost.configure(Docker().socket)
+@when('dockerhost.available')
+def run_images(dh):
+    images = dh.images
+    hookenv.log(images)
+    if images:
+        for image in images:
+            run_image(dh, image)
 
 
 def recycle_daemon():
@@ -279,9 +95,6 @@ def recycle_daemon():
 
     # Re-render our docker daemon template at this time... because we're
     # restarting. And its nice to play nice with others. Isn't that nice?
-    opts = DockerOpts()
-    render('docker.defaults', '/etc/default/docker',
-           {'opts': opts.to_s(), 'manual': config('docker-opts')})
     render('docker.systemd', '/lib/systemd/system/docker.service', config())
     reload_system_daemons()
     host.service_restart('docker')
@@ -314,23 +127,58 @@ def _probe_runtime_availability():
         remove_state('docker.available')
         return False
 
+def run_image(dh, image):
+    '''When the provided image is not running, set it up and run it. '''
+    hookenv.log(image)
+    container = get_container_id(image)
+    if container:
+        hookenv.log('There is already a container ({}) for this image.'.format(container))
+        return
 
-def _remove_docker_network_bridge():
-    ''' By default docker uses the docker0 bridge for container networking.
-    This method removes the default docker bridge, and reconfigures the
-    DOCKER_OPTS to use the SDN networking bridge. '''
-    status_set('maintenance',
-               'Reconfiguring container runtime network bridge.')
-    host.service_stop('docker')
-    apt_install(['bridge-utils'], fatal=True)
-    # cmd = "ifconfig docker0 down"
-    # ifconfig doesn't always work. use native linux networking commands to
-    # mark the bridge as inactive.
-    cmd = ['ip', 'link', 'set', 'docker0', 'down']
+    hookenv.log('Fetching image {}'.format(image['name']))
+    if image['username'] and image['secret']:
+        hookenv.status_set('maintenance', 'Pulling docker image from private docker hub.')
+        cmd = ['docker', 'login', '-u', image['username'], '-p', image['secret']]
+        check_call(cmd)
+    elif image['username']:
+        hookenv.status_set('blocking', 'Pulling the docker image failed. When providing a username, make sure you also fill in the secret.')
+        return
+    elif image['secret']:
+        hookenv.status_set('blocking', 'Pulling the docker image failed. When providing a secret, make sure you also fill in the username.')
+        return
+    
+    cmd = ['docker', 'pull', image['image']]
     check_call(cmd)
 
-    cmd = ['brctl', 'delbr', 'docker0']
+    cmd = ['docker', 'run', '--name', '{}'.format(image['name'])]
+    if image['daemon']:
+        cmd.append('-d')
+    hookenv.log(image['ports'])
+    if image['interactive']:
+        cmd.append('-i')
+    if image['ports']:
+        published_ports = {}
+        kv = unitdata.kv()
+        next_port = kv.get('next_port')
+        hookenv.log('For this docker engine, the next available port is {}.'.format(next_port))
+        for port in image['ports']:
+            cmd.append('-p')
+            cmd.append('{}:{}'.format(next_port++, port.strip()))
+            published_ports[next_port] = port.strip()
+        kv.set('next_port', next_port)
+        hookenv.log('Reset the next available port for this docker engine to {}.'.format(next_port))
+        dh.send_published_ports(published_ports)
+        
+    cmd.append('{}'.format(image['image']))
+    hookenv.log(cmd)
     check_call(cmd)
 
-    # Render the config and restart docker.
-    recycle_daemon()
+def get_container_id(image):
+    cmd = ['docker', 'ps', '-aq', '-f', 'name={}'.format(image['name'])]
+    return check_output(cmd).decode('utf-8').strip()
+
+def remove_container(container_id):
+    cmd = ['docker', 'rm', '-f', container_id]
+    return check_call(cmd)
+
+

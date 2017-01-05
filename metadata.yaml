@@ -1,19 +1,14 @@
 name: docker
 summary: A Juju charm layer to use Docker containers in charms.
 maintainers:
-    - Charles Butler <charles.butler@canonical.com>
-    - Matthew Bruzek <matthew.bruzek@canonical.com>
+    - Gregory Van Seghbroeck <gregory.vanseghbroeck@qrama.io>
 description: |
-  A Juju charm layer that handles installing Docker, including a library to 
-  make it easier to use Docker containers inside a Juju model.
+  A Juju charm layer that handles installing Docker. This layer is somewhat 
+  based on the juju-solutions docker charm 
 tags:
   - containers
   - layer
 subordinate: false
 provides:
   dockerhost:
-    interface: dockerhost
-    scope: container
-  sdn-plugin:
-    interface: sdn-plugin
-    scope: container
+    interface: docker-image-host
