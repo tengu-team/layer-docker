@@ -3,11 +3,10 @@ includes:
   - 'layer:apt'
   - 'interface:docker-image-host'
 repo: git@github.com:IBCNServices/layer-docker.git
-defines:
-  skip-install:
-    description: Useful when creating docker subordinates, skip the install routine
-    type: boolean
-    default: false
 exclude:
   - tests/10-deploy.py
   - tests/tests.yaml
+options:
+  apt:
+    packages:
+       - 'docker.io'
