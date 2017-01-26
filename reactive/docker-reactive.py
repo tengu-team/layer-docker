@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
-# pylint:disable=c0111,c0103
 from time import sleep
-from subprocess import check_call, CalledProcessError
+from subprocess import check_call
 
 import docker
 from charmhelpers.core import host
@@ -12,19 +11,14 @@ from charmhelpers.core.hookenv import (
     unit_private_ip,
 )
 
-from charms.reactive import remove_state, set_state, when, when_not
+from charms.reactive import set_state, when, when_not
 
 
 @when('apt.installed.docker.io')
-@when_not('docker.ready')
+@when_not('docker.available')
 def configure_docker():
     reload_system_daemons()
     check_call(['usermod', '-aG', 'docker', 'ubuntu'])
-    set_state('docker.ready')
-    # Make sure probe is installed
-    if not _probe_runtime_availability():
-        log("Error! Docker isn't available! This shouldn't happen!")
-        exit(1)
     status_set('active', 'Ready')
     set_state('docker.available')
 
@@ -37,18 +31,6 @@ def run_images(relation):
     for (uuid, container_request) in container_requests.items():
         running_containers[uuid] = ensure_running(uuid, container_request)
     relation.send_running_containers(running_containers)
-
-
-def _probe_runtime_availability():
-    ''' Determine if the workload daemon is active and responding '''
-    try:
-        cmd = ['docker', 'info']
-        check_call(cmd)
-        return True
-    except CalledProcessError:
-        # Remove the availability state if we fail reachability
-        remove_state('docker.available')
-        return False
 
 
 def ensure_running(uuid, container_request):
