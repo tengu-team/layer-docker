@@ -7,11 +7,12 @@ from charmhelpers.core import host
 from charmhelpers.core.hookenv import (
     status_set,
     open_port,
+    close_port,
     log,
     unit_private_ip,
 )
 
-from charms.reactive import set_state, when, when_not
+from charms.reactive import set_state, remove_state, when, when_not
 
 
 @when('apt.installed.docker.io')
@@ -31,6 +32,16 @@ def run_images(relation):
     for (uuid, container_request) in container_requests.items():
         running_containers[uuid] = ensure_running(uuid, container_request)
     relation.send_running_containers(running_containers)
+
+
+@when('dockerhost.broken')
+def remove_images(relation):
+    container_requests = relation.container_requests
+    log(container_requests)
+    for uuid in container_requests:
+        remove(uuid)
+    print("wololo")
+    remove_state('dockerhost.broken')
 
 
 def ensure_running(uuid, container_request):
@@ -76,6 +87,28 @@ def ensure_running(uuid, container_request):
         'host': unit_private_ip(),
         'ports': open_ports,
     }
+
+
+def remove(uuid):
+    '''When the provided image is not running, set it up and run it. '''
+    client = docker.from_env()
+
+    # Only start container when it is not already running
+    try:
+        container = client.containers.get(uuid)
+    except docker.errors.NotFound:
+        print("Container {} not found, not removing.".format(uuid))
+        return
+    check_call(['docker', 'stop', str(uuid)])
+    check_call(['docker', 'rm', str(uuid)])
+    # Unexpose ports
+    ports = container.attrs['NetworkSettings']['Ports'] or {}
+    for exposed_port in ports.keys():
+        print("exp_port: " + exposed_port)
+        proto = exposed_port.split('/')[1]
+        for host_portip in ports[exposed_port]:
+            print("host_portip " + str(host_portip))
+            close_port(host_portip['HostPort'], protocol=proto)
 
 
 #
